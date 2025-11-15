@@ -52,12 +52,49 @@ https://github.com/lclichen/LiteLoaderQQNT-TTS/blob/main/manifest.json
 
 ## 注意事项 | Notes
 
-建议用户自行配置可用的TTS接口地址，默认测试配置中的接口可能会下线。目前支持类似于[simple-vits-api](https://github.com/Artrajz/vits-simple-api)类型的，在请求中发送文本，直接获取音频文件的响应，请求方法可以是GET或POST。
+建议用户自行配置可用的TTS接口地址，默认测试配置中的接口可能会下线。
 
-例如，gptsovits的接口格式根据[GPT-SoVITS/api.py](https://github.com/RVC-Boss/GPT-SoVITS/blob/main/api.py)中的推理格式构建，请按照该文件中的使用方式启用GPT-SoVITS后端API接口（接口更新请自行同步修改相关参数）。
+### 支持的接口类型
 
-**注意，source_key参数用于标记文本所对应的键值，在修改配置时需要保留**
-**注意，format参数用于统一标记后端返回的音频格式，即使后端不解析本参数，也需要保留用于模块解析**
+插件支持两种 TTS 接口响应格式，通过子配置文件中的 `host_type` 字段区分：
+
+1. **二进制音频格式** (`host_type: "vits"`)
+   - 直接返回音频文件的二进制数据
+   - 适用接口：[simple-vits-api](https://github.com/Artrajz/vits-simple-api)、[GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS/blob/main/api.py) 等
+   - 请求方法可以是 GET 或 POST
+   - 支持的音频格式：wav、mp3、ogg、silk 等
+   - **性能优化**：如果后端返回 wav 或 silk 格式，插件会跳过 ffmpeg 转换步骤，直接使用原始音频
+
+2. **JSON 格式** (`host_type: "minimax"`)
+   - 返回 JSON 对象，音频数据为十六进制编码字符串
+   - 适用接口：Minimax TTS API 等类似接口
+   - 响应格式示例：
+     ```json
+     {
+       "data": { "audio": "<hex encoded audio>" },
+       "base_resp": { "status_code": 0, "status_msg": "success" }
+     }
+     ```
+
+### 重要配置参数
+
+- **source_key**：用于标记文本所对应的键值，在修改配置时需要保留
+- **format**：用于统一标记后端返回的音频格式，即使后端不解析本参数，也需要保留用于模块解析
+- **host_type**：用于标识接口类型（`vits` 或 `minimax`），默认为 `vits`
+
+### 参数类型支持
+
+从最新版本开始，动态参数和请求头支持多种数据类型：
+
+- **字符串 (string)**：普通文本值，例如 `"zh"` 或 `"Bearer token123"`
+- **数字 (number)**：整数或浮点数，例如 `0.5` 或 `100`
+- **布尔 (boolean)**：true 或 false，用于开关选项
+- **对象 (object)**：JSON 对象，例如 `{"key": "value", "nested": {"a": 1}}`
+
+在设置界面中：
+- 现有参数会自动识别类型并显示对应的编辑控件
+- 添加新参数时可以在下拉菜单中选择类型
+- 对象类型参数使用 JSON 格式编辑，格式错误时会显示红色边框提示
 
 需要将 [ffmpeg (包括 ffprobe)](https://ffmpeg.org) 添加至环境变量，用于将非silk格式音频转换到pcm格式，便于后续编码。
 

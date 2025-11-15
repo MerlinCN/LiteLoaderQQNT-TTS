@@ -9,6 +9,8 @@ let currentOption = null;
 
 let tmpParamKey = "请输入参数Key后点击确认";
 let tmpParamValue = "待修改参数值";
+let tmpHeaderKey = "";
+let tmpHeaderValue = "";
 
 // 配置管理工具函数
 const configManager = {
@@ -63,22 +65,68 @@ const logger = {
 };
 
 
-function requestPost(hosturl, params) {
-    return fetch(hosturl, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(params)
-    }).then((response) => {
-        if (!response.ok) {
-            throw new Error(`HTTP error, status = ${response.status}`);
-        }
-        return response.arrayBuffer();
-    })
+/**
+ * 将十六进制字符串转换为 ArrayBuffer
+ * @param {string} hexString - 十六进制编码的字符串
+ * @returns {ArrayBuffer}
+ */
+function hexToArrayBuffer(hexString) {
+    const bytes = new Uint8Array(hexString.length / 2);
+    for (let i = 0; i < hexString.length; i += 2) {
+        bytes[i / 2] = parseInt(hexString.substring(i, i + 2), 16);
+    }
+    return bytes.buffer;
 }
 
-function requestGet(hosturl, params) {
+/**
+ * 根据 host_type 解析不同格式的响应
+ * @param {Response} response - fetch 响应对象
+ * @param {string} hostType - API 类型 (vits, minimax 等)
+ * @returns {Promise<ArrayBuffer>}
+ */
+async function parseResponse(response, hostType) {
+    if (!response.ok) {
+        throw new Error(`HTTP error, status = ${response.status}`);
+    }
+
+    // 根据不同的 API 类型处理响应
+    switch (hostType) {
+        case 'minimax': {
+            // minimax 返回 JSON，音频数据在 data.audio 字段（十六进制编码）
+            const jsonData = await response.json();
+            if (jsonData.base_resp?.status_code !== 0) {
+                throw new Error(`Minimax API error: ${jsonData.base_resp?.status_msg || 'Unknown error'}`);
+            }
+            const hexAudio = jsonData.data?.audio;
+            if (!hexAudio) {
+                throw new Error('Minimax response missing data.audio field');
+            }
+            logger.info(`Minimax 音频信息: 格式=${jsonData.extra_info?.audio_format}, 大小=${jsonData.extra_info?.audio_size}, 时长=${jsonData.extra_info?.audio_length}ms`);
+            return hexToArrayBuffer(hexAudio);
+        }
+
+        case 'vits':
+        default:
+            // 默认处理：直接返回二进制音频数据
+            return response.arrayBuffer();
+    }
+}
+
+function requestPost(hosturl, params, customHeaders = {}, hostType = 'vits') {
+    const headers = {
+        'Content-Type': 'application/json',
+        ...customHeaders
+    };
+    logger.info("headers: ", headers);
+    logger.info("params: ", params);
+    return fetch(hosturl, {
+        method: 'POST',
+        headers: headers,
+        body: JSON.stringify(params)
+    }).then((response) => parseResponse(response, hostType));
+}
+
+function requestGet(hosturl, params, customHeaders = {}, hostType = 'vits') {
     // 处理参数
     let url = new URL(hosturl);
     let searchParams = new URLSearchParams(params);
@@ -87,12 +135,9 @@ function requestGet(hosturl, params) {
         searchParams.append(key, value);
     });
     url.search = searchParams;
-    return fetch(url).then((response) => {
-        if (!response.ok) {
-            throw new Error(`HTTP error, status = ${response.status}`);
-        }
-        return response.arrayBuffer();
-    })
+    return fetch(url, {
+        headers: customHeaders
+    }).then((response) => parseResponse(response, hostType));
 }
 
 function callTTS(sourceText, targetLang, optionsCache) {
@@ -103,12 +148,14 @@ function callTTS(sourceText, targetLang, optionsCache) {
     if (http_type == undefined) {
         http_type = "get";
     }
+    const host_type = optionsCache?.host_type || 'vits';
     let params = optionsCache.params;
     params[params.source_key] = sourceText;
+    const headers = optionsCache.headers || {};
     if (http_type == "get") {
-        return requestGet(optionsCache.host, params)
+        return requestGet(optionsCache.host, params, headers, host_type);
     } else if (http_type == "post") {
-        return requestPost(optionsCache.host, params)
+        return requestPost(optionsCache.host, params, headers, host_type);
     }
 }
 
@@ -130,6 +177,49 @@ function observeElement2(selector, callback, callbackEnable = true, interval = 1
 
 // 渲染动态参数的函数
 
+/**
+ * 获取参数值的类型
+ * @param {*} value - 参数值
+ * @returns {string} - 'boolean', 'object', 'number', 'string'
+ */
+function getParamType(value) {
+    if (typeof value === 'boolean') return 'boolean';
+    if (typeof value === 'object' && value !== null) return 'object';
+    if (typeof value === 'number') return 'number';
+    return 'string';
+}
+
+/**
+ * 根据参数类型渲染对应的输入控件
+ * @param {*} paramValue - 参数值
+ * @param {string} paramType - 参数类型
+ * @returns {string} - HTML 字符串
+ */
+function renderParamInput(paramValue, paramType) {
+    switch (paramType) {
+        case 'boolean':
+            return `
+                <select class="param-value param-value-boolean" data-type="boolean">
+                    <option value="true" ${paramValue === true ? 'selected' : ''}>true</option>
+                    <option value="false" ${paramValue === false ? 'selected' : ''}>false</option>
+                </select>
+            `;
+        case 'object':
+            return `
+                <textarea class="param-value param-value-object" data-type="object" rows="3" style="flex: 1; resize: vertical; font-family: monospace; padding: 6px 10px;">${JSON.stringify(paramValue, null, 2)}</textarea>
+            `;
+        case 'number':
+            return `
+                <input class="param-value param-value-number" data-type="number" type="number" value="${paramValue}" step="any" />
+            `;
+        default: // string
+            const escapedValue = String(paramValue).replace(/"/g, '&quot;');
+            return `
+                <input class="param-value param-value-string" data-type="string" type="text" value="${escapedValue}" />
+            `;
+    }
+}
+
 function renderParams(view, optionsEditing) {
     const paramsContainer = view.querySelector(".text_to_speech .params-container");
     paramsContainer.innerHTML = '';
@@ -140,10 +230,15 @@ function renderParams(view, optionsEditing) {
         let desc = '';
         if (paramKey === "source_key") desc = `title="source_key用于指示输入内容对应参数的key"`;
         if (paramKey === "format") desc = `title="format用于指示接口返回音频内容的格式"`;
+
+        const paramType = getParamType(paramValue);
+        const inputHtml = renderParamInput(paramValue, paramType);
+
         paramElement.innerHTML = `
-            <div class="input-group">
+            <div class="input-group" style="align-items: flex-start;">
                 <input class="param-key" ${desc} type="text" value="${paramKey}" readonly />
-                <input class="param-value" type="text" value="${paramValue}" />
+                ${inputHtml}
+                <span class="param-type-indicator" style="min-width: 60px; padding: 6px 10px; font-size: 0.85em; color: #666;">${paramType}</span>
                 <div class="ops-btns">
                     <setting-button data-type="secondary" class="param-remove">移除</setting-button>
                 </div>
@@ -159,9 +254,96 @@ function renderParams(view, optionsEditing) {
                 console.log(optionsEditing);
             }
         });
-        paramElement.querySelector(".param-value").addEventListener("input", (e) => {
-            optionsEditing.params[paramKey] = e.target.value;
+
+        const valueInput = paramElement.querySelector(".param-value");
+        const dataType = valueInput.getAttribute("data-type");
+
+        if (dataType === 'boolean') {
+            valueInput.addEventListener("change", (e) => {
+                optionsEditing.params[paramKey] = e.target.value === 'true';
+            });
+        } else if (dataType === 'object') {
+            valueInput.addEventListener("input", (e) => {
+                try {
+                    optionsEditing.params[paramKey] = JSON.parse(e.target.value);
+                    valueInput.style.borderColor = '';
+                } catch (error) {
+                    // JSON 解析失败时显示红色边框提示
+                    valueInput.style.borderColor = 'red';
+                }
+            });
+        } else if (dataType === 'number') {
+            valueInput.addEventListener("input", (e) => {
+                const num = parseFloat(e.target.value);
+                optionsEditing.params[paramKey] = isNaN(num) ? 0 : num;
+            });
+        } else {
+            valueInput.addEventListener("input", (e) => {
+                optionsEditing.params[paramKey] = e.target.value;
+            });
+        }
+    });
+}
+
+// 渲染动态请求头的函数
+function renderHeaders(view, optionsEditing) {
+    const headersContainer = view.querySelector(".text_to_speech .headers-container");
+    headersContainer.innerHTML = '';
+    // 确保 headers 对象存在
+    if (!optionsEditing.headers) {
+        optionsEditing.headers = {};
+    }
+    Object.entries(optionsEditing.headers || {}).forEach(([headerKey, headerValue]) => {
+        const headerElement = document.createElement("setting-item");
+        headerElement.classList.add("header-entry");
+        headerElement.setAttribute("data-direction", "row");
+
+        const headerType = getParamType(headerValue);
+        const inputHtml = renderParamInput(headerValue, headerType);
+
+        headerElement.innerHTML = `
+            <div class="input-group" style="align-items: flex-start;">
+                <input class="header-key" type="text" value="${headerKey}" readonly />
+                ${inputHtml}
+                <span class="param-type-indicator" style="min-width: 60px; padding: 6px 10px; font-size: 0.85em; color: #666;">${headerType}</span>
+                <div class="ops-btns">
+                    <setting-button data-type="secondary" class="header-remove">移除</setting-button>
+                </div>
+            </div>
+        `;
+        headersContainer.appendChild(headerElement);
+        headerElement.querySelector(".header-remove").addEventListener("click", () => {
+            delete optionsEditing.headers[headerKey];
+            renderHeaders(view, optionsEditing);
+            console.log(optionsEditing);
         });
+
+        const valueInput = headerElement.querySelector(".param-value");
+        const dataType = valueInput.getAttribute("data-type");
+
+        if (dataType === 'boolean') {
+            valueInput.addEventListener("change", (e) => {
+                optionsEditing.headers[headerKey] = e.target.value === 'true';
+            });
+        } else if (dataType === 'object') {
+            valueInput.addEventListener("input", (e) => {
+                try {
+                    optionsEditing.headers[headerKey] = JSON.parse(e.target.value);
+                    valueInput.style.borderColor = '';
+                } catch (error) {
+                    valueInput.style.borderColor = 'red';
+                }
+            });
+        } else if (dataType === 'number') {
+            valueInput.addEventListener("input", (e) => {
+                const num = parseFloat(e.target.value);
+                optionsEditing.headers[headerKey] = isNaN(num) ? 0 : num;
+            });
+        } else {
+            valueInput.addEventListener("input", (e) => {
+                optionsEditing.headers[headerKey] = e.target.value;
+            });
+        }
     });
 }
 
@@ -391,6 +573,10 @@ export const onSettingWindowCreated = async view => {
         console.log("当前配置文件缺少http_type参数，已自动补全为get");
         currentOption.http_type = "get";
     }
+    if (currentOption.headers == undefined) {
+        console.log("当前配置文件缺少headers参数，已自动补全为空对象");
+        currentOption.headers = {};
+    }
 
     const apiOpenOptions = view.querySelector(".text_to_speech .open");
     const apiReloadOptions = view.querySelector(".text_to_speech .reload");
@@ -417,6 +603,12 @@ export const onSettingWindowCreated = async view => {
             console.log("当前配置文件缺少http_type参数，已自动补全为get");
             optionsEditing.http_type = "get";
         }
+        if (optionsEditing.headers == undefined) {
+            console.log("当前配置文件缺少headers参数，已自动补全为空对象");
+            optionsEditing.headers = {};
+        }
+        renderParams(view, optionsEditing);
+        renderHeaders(view, optionsEditing);
         api_input.value = optionsEditing.host;
         apiType.value = optionsEditing.host_type;
         httpType.value = optionsEditing.http_type;
@@ -452,8 +644,13 @@ export const onSettingWindowCreated = async view => {
             console.log("当前配置文件缺少http_type参数，已自动补全为get");
             currentOption.http_type = "get";
         }
+        if (currentOption.headers == undefined) {
+            console.log("当前配置文件缺少headers参数，已自动补全为空对象");
+            currentOption.headers = {};
+        }
         optionsEditing = currentOption;
         renderParams(view, optionsEditing);
+        renderHeaders(view, optionsEditing);
         api_input.value = optionsEditing.host;
         apiType.value = optionsEditing.host_type;
         httpType.value = optionsEditing.http_type;
@@ -461,6 +658,7 @@ export const onSettingWindowCreated = async view => {
 
     let optionsEditing = currentOption;
     renderParams(view, optionsEditing);
+    renderHeaders(view, optionsEditing);
 
     // 新建空白子配置/刷新本地子配置列表
     const subconfigCreator = view.querySelector(".text_to_speech .new-subconfig");
@@ -550,26 +748,108 @@ export const onSettingWindowCreated = async view => {
     addParamBtn.addEventListener("click", () => {
         tmpParamKey = "";
         tmpParamValue = "";
+        let tmpParamType = "string"; // 默认类型为字符串
         const addParamContainer = view.querySelector(".text_to_speech .add-param-container");
         addParamContainer.innerHTML = '';
         const addParamElement = document.createElement("setting-item");
         addParamElement.classList.add("param-entry");
         addParamElement.setAttribute("data-direction", "row");
         addParamElement.innerHTML = `
-            <div class="input-group">
-                <input class="add-param-key" type="text" placeholder="请输入参数Key后点击确认" value="" />
-                <input class="add-param-value" type="text" placeholder="待修改参数值" value="" />
-                <div class="ops-btns">
-                    <setting-button data-type="secondary" class="add-param-confirm">确认</setting-button>
+            <div class="input-group" style="flex-direction: column; align-items: stretch;">
+                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                    <input class="add-param-key" type="text" placeholder="请输入参数Key" value="" style="flex: 2;" />
+                    <select class="add-param-type" style="flex: 1;">
+                        <option value="string">字符串</option>
+                        <option value="number">数字</option>
+                        <option value="boolean">布尔</option>
+                        <option value="object">对象</option>
+                    </select>
                 </div>
-                <div class="ops-btns">
-                    <setting-button data-type="secondary" class="add-param-remove">取消</setting-button>
+                <div style="display: flex; gap: 8px;">
+                    <input class="add-param-value" type="text" placeholder="请输入参数值" value="" style="flex: 1;" />
+                    <div class="ops-btns">
+                        <setting-button data-type="secondary" class="add-param-confirm">确认</setting-button>
+                    </div>
+                    <div class="ops-btns">
+                        <setting-button data-type="secondary" class="add-param-remove">取消</setting-button>
+                    </div>
                 </div>
             </div>
         `;
         addParamContainer.appendChild(addParamElement);
+
+        const typeSelect = addParamElement.querySelector(".add-param-type");
+        const valueInput = addParamElement.querySelector(".add-param-value");
+
+        // 根据类型切换输入控件
+        typeSelect.addEventListener("change", (e) => {
+            tmpParamType = e.target.value;
+            const container = valueInput.parentElement;
+            const newInput = document.createElement(tmpParamType === 'object' ? 'textarea' : 'input');
+            newInput.className = 'add-param-value';
+            newInput.style.flex = '1';
+
+            switch (tmpParamType) {
+                case 'boolean':
+                    newInput.innerHTML = '<option value="true">true</option><option value="false">false</option>';
+                    const select = document.createElement('select');
+                    select.className = 'add-param-value';
+                    select.style.flex = '1';
+                    select.innerHTML = '<option value="true">true</option><option value="false">false</option>';
+                    container.replaceChild(select, valueInput);
+                    select.addEventListener("change", (e) => {
+                        tmpParamValue = e.target.value === 'true';
+                    });
+                    tmpParamValue = true;
+                    return;
+                case 'object':
+                    newInput.rows = 3;
+                    newInput.style.resize = 'vertical';
+                    newInput.style.fontFamily = 'monospace';
+                    newInput.placeholder = '请输入JSON对象，如 {"key": "value"}';
+                    newInput.value = '{}';
+                    tmpParamValue = {};
+                    break;
+                case 'number':
+                    newInput.type = 'number';
+                    newInput.step = 'any';
+                    newInput.placeholder = '请输入数字';
+                    newInput.value = '0';
+                    tmpParamValue = 0;
+                    break;
+                default:
+                    newInput.type = 'text';
+                    newInput.placeholder = '请输入参数值';
+                    newInput.value = '';
+                    tmpParamValue = '';
+            }
+            container.replaceChild(newInput, valueInput);
+            newInput.addEventListener("input", (e) => {
+                if (tmpParamType === 'object') {
+                    try {
+                        tmpParamValue = JSON.parse(e.target.value);
+                        newInput.style.borderColor = '';
+                    } catch (error) {
+                        newInput.style.borderColor = 'red';
+                    }
+                } else if (tmpParamType === 'number') {
+                    tmpParamValue = parseFloat(e.target.value) || 0;
+                } else {
+                    tmpParamValue = e.target.value;
+                }
+            });
+        });
+
         addParamElement.querySelector(".add-param-confirm").addEventListener("click", () => {
             if (tmpParamKey && !optionsEditing.params[tmpParamKey]) {
+                if (tmpParamType === 'object' && typeof tmpParamValue === 'string') {
+                    try {
+                        tmpParamValue = JSON.parse(tmpParamValue);
+                    } catch (error) {
+                        alert("JSON 格式错误！");
+                        return;
+                    }
+                }
                 optionsEditing.params[tmpParamKey] = tmpParamValue;
                 addParamContainer.removeChild(addParamElement);
                 renderParams(view, optionsEditing);
@@ -584,7 +864,153 @@ export const onSettingWindowCreated = async view => {
             tmpParamKey = e.target.value;
         });
         addParamElement.querySelector(".add-param-value").addEventListener("input", (e) => {
-            tmpParamValue = e.target.value;
+            if (tmpParamType === 'object') {
+                try {
+                    tmpParamValue = JSON.parse(e.target.value);
+                    e.target.style.borderColor = '';
+                } catch (error) {
+                    e.target.style.borderColor = 'red';
+                }
+            } else if (tmpParamType === 'number') {
+                tmpParamValue = parseFloat(e.target.value) || 0;
+            } else {
+                tmpParamValue = e.target.value;
+            }
+        });
+    });
+
+    // 新增请求头按钮事件
+    const addHeaderBtn = view.querySelector(".text_to_speech .add-header");
+    addHeaderBtn.addEventListener("click", () => {
+        tmpHeaderKey = "";
+        tmpHeaderValue = "";
+        let tmpHeaderType = "string"; // 默认类型为字符串
+        const addHeaderContainer = view.querySelector(".text_to_speech .add-header-container");
+        addHeaderContainer.innerHTML = '';
+        const addHeaderElement = document.createElement("setting-item");
+        addHeaderElement.classList.add("header-entry");
+        addHeaderElement.setAttribute("data-direction", "row");
+        addHeaderElement.innerHTML = `
+            <div class="input-group" style="flex-direction: column; align-items: stretch;">
+                <div style="display: flex; gap: 8px; margin-bottom: 8px;">
+                    <input class="add-header-key" type="text" placeholder="请输入请求头Key，如Authorization" value="" style="flex: 2;" />
+                    <select class="add-header-type" style="flex: 1;">
+                        <option value="string">字符串</option>
+                        <option value="number">数字</option>
+                        <option value="boolean">布尔</option>
+                        <option value="object">对象</option>
+                    </select>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <input class="add-header-value" type="text" placeholder="请输入请求头值" value="" style="flex: 1;" />
+                    <div class="ops-btns">
+                        <setting-button data-type="secondary" class="add-header-confirm">确认</setting-button>
+                    </div>
+                    <div class="ops-btns">
+                        <setting-button data-type="secondary" class="add-header-remove">取消</setting-button>
+                    </div>
+                </div>
+            </div>
+        `;
+        addHeaderContainer.appendChild(addHeaderElement);
+
+        const typeSelect = addHeaderElement.querySelector(".add-header-type");
+        const valueInput = addHeaderElement.querySelector(".add-header-value");
+
+        // 根据类型切换输入控件
+        typeSelect.addEventListener("change", (e) => {
+            tmpHeaderType = e.target.value;
+            const container = valueInput.parentElement;
+            const newInput = document.createElement(tmpHeaderType === 'object' ? 'textarea' : 'input');
+            newInput.className = 'add-header-value';
+            newInput.style.flex = '1';
+
+            switch (tmpHeaderType) {
+                case 'boolean':
+                    const select = document.createElement('select');
+                    select.className = 'add-header-value';
+                    select.style.flex = '1';
+                    select.innerHTML = '<option value="true">true</option><option value="false">false</option>';
+                    container.replaceChild(select, valueInput);
+                    select.addEventListener("change", (e) => {
+                        tmpHeaderValue = e.target.value === 'true';
+                    });
+                    tmpHeaderValue = true;
+                    return;
+                case 'object':
+                    newInput.rows = 3;
+                    newInput.style.resize = 'vertical';
+                    newInput.style.fontFamily = 'monospace';
+                    newInput.placeholder = '请输入JSON对象，如 {"key": "value"}';
+                    newInput.value = '{}';
+                    tmpHeaderValue = {};
+                    break;
+                case 'number':
+                    newInput.type = 'number';
+                    newInput.step = 'any';
+                    newInput.placeholder = '请输入数字';
+                    newInput.value = '0';
+                    tmpHeaderValue = 0;
+                    break;
+                default:
+                    newInput.type = 'text';
+                    newInput.placeholder = '请输入请求头值';
+                    newInput.value = '';
+                    tmpHeaderValue = '';
+            }
+            container.replaceChild(newInput, valueInput);
+            newInput.addEventListener("input", (e) => {
+                if (tmpHeaderType === 'object') {
+                    try {
+                        tmpHeaderValue = JSON.parse(e.target.value);
+                        newInput.style.borderColor = '';
+                    } catch (error) {
+                        newInput.style.borderColor = 'red';
+                    }
+                } else if (tmpHeaderType === 'number') {
+                    tmpHeaderValue = parseFloat(e.target.value) || 0;
+                } else {
+                    tmpHeaderValue = e.target.value;
+                }
+            });
+        });
+
+        addHeaderElement.querySelector(".add-header-confirm").addEventListener("click", () => {
+            if (tmpHeaderKey && !optionsEditing.headers[tmpHeaderKey]) {
+                if (tmpHeaderType === 'object' && typeof tmpHeaderValue === 'string') {
+                    try {
+                        tmpHeaderValue = JSON.parse(tmpHeaderValue);
+                    } catch (error) {
+                        alert("JSON 格式错误！");
+                        return;
+                    }
+                }
+                optionsEditing.headers[tmpHeaderKey] = tmpHeaderValue;
+                addHeaderContainer.removeChild(addHeaderElement);
+                renderHeaders(view, optionsEditing);
+            } else {
+                alert("请求头名称已存在或无效！");
+            }
+        });
+        addHeaderElement.querySelector(".add-header-remove").addEventListener("click", () => {
+            addHeaderContainer.removeChild(addHeaderElement);
+        });
+        addHeaderElement.querySelector(".add-header-key").addEventListener("input", (e) => {
+            tmpHeaderKey = e.target.value;
+        });
+        addHeaderElement.querySelector(".add-header-value").addEventListener("input", (e) => {
+            if (tmpHeaderType === 'object') {
+                try {
+                    tmpHeaderValue = JSON.parse(e.target.value);
+                    e.target.style.borderColor = '';
+                } catch (error) {
+                    e.target.style.borderColor = 'red';
+                }
+            } else if (tmpHeaderType === 'number') {
+                tmpHeaderValue = parseFloat(e.target.value) || 0;
+            } else {
+                tmpHeaderValue = e.target.value;
+            }
         });
     });
 

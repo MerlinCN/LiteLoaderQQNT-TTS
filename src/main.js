@@ -204,17 +204,18 @@ ipcMain.handle(
             const bufferData = Buffer.from(fileData);
             fs.writeFileSync(filePath, bufferData);
             const ext = path.extname(filePath);
-            if (![".silk"].includes(ext)) {
-                let error = await convertToWAV(filePath, filePath)
-                if (error) {
-                    logger.error(error);
-                    return { res: "error", msg: error };
-                }
-                return { res: "success", file: `${filePath}.wav`, origin: filePath };
-            }
-            else {
+            // 如果文件已经是 wav 或 silk 格式，直接使用，不进行转换
+            // 假设后端返回的 wav 格式已经符合要求（24kHz, 单声道, 16-bit PCM）
+            if ([".wav", ".silk"].includes(ext)) {
                 return { res: "success", file: filePath, origin: filePath };
             }
+            // 其他格式需要通过 ffmpeg 转换为 wav
+            let error = await convertToWAV(filePath, filePath)
+            if (error) {
+                logger.error(error);
+                return { res: "error", msg: error };
+            }
+            return { res: "success", file: `${filePath}.wav`, origin: filePath };
         } catch (error) {
             logger.error(error);
             return { res: "error", msg: error };

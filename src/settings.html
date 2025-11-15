@@ -93,7 +93,9 @@
     }
 
     .params-container,
-    .add-param-container {
+    .add-param-container,
+    .headers-container,
+    .add-header-container {
         margin-top: 8px;
     }
 
@@ -195,6 +197,15 @@
         <div class="add-param-container"></div>
         <div class="input-group">
             <setting-button data-type="secondary" class="add-param">增加参数</setting-button>
+        </div>
+        <hr class="tts-divider">
+        <div class="tts-title" style="font-size:1em;margin-bottom:4px;">动态请求头配置</div>
+        <div class="tts-desc">配置自定义HTTP请求头，如Authorization、User-Agent等</div>
+        <div class="headers-container"></div>
+        <hr class="tts-divider">
+        <div class="add-header-container"></div>
+        <div class="input-group">
+            <setting-button data-type="secondary" class="add-header">增加请求头</setting-button>
         </div>
         <div class="save-all-container">
             <setting-button data-type="primary" class="save-all">保存当前子配置文件参数</setting-button>
